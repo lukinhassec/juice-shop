@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2025 Bjoern Kimminich & the OWASP Juice Shop contributors.
+ * Copyright (c) 2014-2026 Bjoern Kimminich & the OWASP Juice Shop contributors.
  * SPDX-License-Identifier: MIT
  */
 
@@ -19,6 +19,9 @@ module.exports = {
   parserOptions: {
     ecmaVersion: 2018,
     project: './tsconfig.json'
+  },
+  rules: {
+    'semi': ['error', 'never']
   },
   ignorePatterns: [
     '.eslintrc.js',

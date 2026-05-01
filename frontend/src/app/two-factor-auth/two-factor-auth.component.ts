@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2014-2025 Bjoern Kimminich & the OWASP Juice Shop contributors.
+ * Copyright (c) 2014-2026 Bjoern Kimminich & the OWASP Juice Shop contributors.
  * SPDX-License-Identifier: MIT
  */
 
-import { Component } from '@angular/core'
+import { Component, inject, OnInit } from '@angular/core'
 import { UntypedFormControl, UntypedFormGroup, Validators, FormsModule, ReactiveFormsModule } from '@angular/forms'
 
 import { TwoFactorAuthService } from '../Services/two-factor-auth-service'
@@ -18,12 +18,12 @@ import { MatSnackBar } from '@angular/material/snack-bar'
 import { SnackBarHelperService } from '../Services/snack-bar-helper.service'
 import { MatTooltip } from '@angular/material/tooltip'
 import { MatIconModule } from '@angular/material/icon'
-import { QrCodeModule } from 'ng-qrcode'
 import { MatButtonModule } from '@angular/material/button'
 import { MatInputModule } from '@angular/material/input'
 import { MatFormFieldModule, MatLabel, MatError, MatSuffix, MatHint } from '@angular/material/form-field'
 
 import { MatCardModule } from '@angular/material/card'
+import { QrCodeComponent } from 'ng-qrcode'
 
 library.add(faUnlockAlt, faSave)
 
@@ -31,9 +31,15 @@ library.add(faUnlockAlt, faSave)
   selector: 'app-two-factor-auth',
   templateUrl: './two-factor-auth.component.html',
   styleUrls: ['./two-factor-auth.component.scss'],
-  imports: [MatCardModule, TranslateModule, FormsModule, ReactiveFormsModule, MatFormFieldModule, MatLabel, MatInputModule, MatButtonModule, QrCodeModule, MatError, MatIconModule, MatSuffix, MatTooltip, MatHint, MatIconModule]
+  imports: [MatCardModule, TranslateModule, FormsModule, ReactiveFormsModule, MatFormFieldModule, MatLabel, MatInputModule, MatButtonModule, QrCodeComponent, MatError, MatIconModule, MatSuffix, MatTooltip, MatHint, MatIconModule]
 })
-export class TwoFactorAuthComponent {
+export class TwoFactorAuthComponent implements OnInit {
+  private readonly twoFactorAuthService = inject(TwoFactorAuthService)
+  private readonly configurationService = inject(ConfigurationService)
+  private readonly snackBar = inject(MatSnackBar)
+  private readonly translateService = inject(TranslateService)
+  private readonly snackBarHelperService = inject(SnackBarHelperService)
+
   public data?: string
 
   public twoFactorSetupForm: UntypedFormGroup = new UntypedFormGroup({
@@ -53,8 +59,6 @@ export class TwoFactorAuthComponent {
   private setupToken?: string
 
   private appName = 'OWASP Juice Shop'
-
-  constructor (private readonly twoFactorAuthService: TwoFactorAuthService, private readonly configurationService: ConfigurationService, private readonly snackBar: MatSnackBar, private readonly translateService: TranslateService, private readonly snackBarHelperService: SnackBarHelperService) {}
 
   ngOnInit (): void {
     this.updateStatus()

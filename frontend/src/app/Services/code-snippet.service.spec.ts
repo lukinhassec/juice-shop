@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2025 Bjoern Kimminich & the OWASP Juice Shop contributors.
+ * Copyright (c) 2014-2026 Bjoern Kimminich & the OWASP Juice Shop contributors.
  * SPDX-License-Identifier: MIT
  */
 
@@ -32,6 +32,20 @@ describe('CodeSnippetService', () => {
 
       expect(req.request.method).toBe('GET')
       expect(res).toEqual({ snippet: 'apiResponse' })
+      httpMock.verify()
+    })
+  ))
+
+  it('should handle error when getting single snippet', inject([CodeSnippetService, HttpTestingController],
+    fakeAsync((service: CodeSnippetService, httpMock: HttpTestingController) => {
+      let capturedError: any
+      service.get('missing').subscribe({ next: () => {}, error: (e) => { capturedError = e } })
+      const req = httpMock.expectOne('http://localhost:3000/snippets/missing')
+      req.flush(null, { status: 404, statusText: 'Not Found' })
+
+      tick()
+      expect(capturedError).toBeTruthy()
+      expect(capturedError.status).toBe(404)
       httpMock.verify()
     })
   ))
