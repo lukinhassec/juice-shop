@@ -4,56 +4,27 @@ trigger:
 pool:
   vmImage: ubuntu-latest
 
-variables:
-  ZAP_API_KEY: 'zapkey123'
-  TARGET_URL: 'http://localhost:3000'
-  ZAP_URL: 'http://localhost:8080'
+steps:
+  - script: |
+      docker run -d --name juiceshop -p 3000:3000 bkimminich/juice-shop
+      echo "Aguardando JuiceShop..."
+      sleep 30
+    displayName: '1. Start JuiceShop'
 
-stages:
-  - stage: DAST_Scan
-    displayName: 'DAST Scan'
-    jobs:
-      - job: ScanJob
-        timeoutInMinutes: 60
-        steps:
+  - script: |
+      docker run --rm \
+        --network host \
+        -v $(Build.ArtifactStagingDirectory):/zap/wrk \
+        ghcr.io/zaproxy/zaproxy:stable \
+        zap-baseline.py \
+        -t http://localhost:3000 \
+        -r zap_report.html \
+        -I
+    displayName: '2. ZAP Baseline Scan'
 
-          - script: |
-              docker run -d --name juiceshop -p 3000:3000 bkimminich/juice-shop
-              echo "Waiting for JuiceShop..."
-              for i in $(seq 1 30); do
-                curl -s http://localhost:3000 > /dev/null && echo "JuiceShop is up!" && break
-                sleep 5
-              done
-            displayName: '1. Start JuiceShop'
-
-          - script: |
-              docker run -d --name zap \
-                --network host \
-                ghcr.io/zaproxy/zaproxy:stable \
-                zap.sh -daemon -port 8080 -host 0.0.0.0 \
-                -config api.key=$(ZAP_API_KEY) \
-                -config api.addrs.addr.name=.* \
-                -config api.addrs.addr.regex=true
-              echo "Waiting for ZAP..."
-              for i in $(seq 1 30); do
-                curl -s "http://localhost:8080/JSON/core/view/version/?apikey=$(ZAP_API_KEY)" > /dev/null && echo "ZAP is up!" && break
-                sleep 5
-              done
-            displayName: '2. Start ZAP'
-
-          - script: pip install requests --quiet
-            displayName: '3. Install Python deps'
-
-          - script: python scripts/run-zap-scan.py
-            displayName: '4. Run ZAP Scan'
-            env:
-              ZAP_API_KEY: $(ZAP_API_KEY)
-              ZAP_URL: $(ZAP_URL)
-              TARGET_URL: $(TARGET_URL)
-
-          - task: PublishBuildArtifacts@1
-            inputs:
-              pathToPublish: 'reports'
-              artifactName: 'security-report'
-            displayName: '5. Publish Report'
-            condition: always()
+  - task: PublishBuildArtifacts@1
+    inputs:
+      pathToPublish: '$(Build.ArtifactStagingDirectory)'
+      artifactName: 'zap-report'
+    displayName: '3. Publish Report'
+    condition: always()
