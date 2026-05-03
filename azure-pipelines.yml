@@ -1,30 +1,78 @@
-trigger:
-- master
+# azure-pipelines.yml
+trigger: none  # manual trigger, evita gastar minutos à toa
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: 'ubuntu-latest'  # Microsoft-hosted, Ubuntu 22.04
 
-steps:
-  - script: |
-      docker run -d --name juiceshop -p 3000:3000 bkimminich/juice-shop
-      echo "Aguardando JuiceShop..."
-      sleep 30
-    displayName: '1. Start JuiceShop'
+variables:
+  JUICE_PORT: 3000
 
-  - script: |
-      docker run --rm \
-        --network host \
-        -v $(Build.ArtifactStagingDirectory):/zap/wrk \
-        ghcr.io/zaproxy/zaproxy:stable \
-        zap-baseline.py \
-        -t http://localhost:3000 \
-        -r zap_report.html \
-        -I
-    displayName: '2. ZAP Baseline Scan'
+jobs:
+  - job: JuiceShopLab
+    displayName: 'OWASP Juice Shop - Lab Environment'
+    timeoutInMinutes: 59  # máximo sem tier pago
 
-  - task: PublishBuildArtifacts@1
-    inputs:
-      pathToPublish: '$(Build.ArtifactStagingDirectory)'
-      artifactName: 'zap-report'
-    displayName: '3. Publish Report'
-    condition: always()
+    steps:
+
+    # 1. Pull e sobe o Juice Shop
+    - script: |
+        docker pull bkimminich/juice-shop:latest
+        docker run -d \
+          --name juice-shop \
+          -p $(JUICE_PORT):3000 \
+          bkimminich/juice-shop:latest
+        echo "Aguardando Juice Shop inicializar..."
+        sleep 15
+        curl -sf http://localhost:$(JUICE_PORT) > /dev/null && echo "Juice Shop UP" || echo "FALHOU"
+      displayName: 'Subir Juice Shop via Docker'
+
+    # 2. Exibe info do ambiente (útil pra debug)
+    - script: |
+        echo "=== Agent Info ==="
+        echo "IP público do agent:"
+        curl -s https://ifconfig.me
+        echo ""
+        echo "Docker containers:"
+        docker ps
+        echo "=== Juice Shop acessível em http://localhost:$(JUICE_PORT) ==="
+      displayName: 'Info do ambiente'
+
+    # 3. [OPCIONAL] Instala ferramentas de pentest no agent
+    - script: |
+        sudo apt-get update -qq
+        # Nikto
+        sudo apt-get install -y nikto
+        # nuclei
+        wget -q https://github.com/projectdiscovery/nuclei/releases/latest/download/nuclei_linux_amd64.zip
+        unzip -q nuclei_linux_amd64.zip
+        sudo mv nuclei /usr/local/bin/
+        nuclei -version
+      displayName: 'Instalar ferramentas (Nikto + Nuclei)'
+
+    # 4. [OPCIONAL] Roda Nikto básico contra o Juice Shop
+    - script: |
+        nikto -h http://localhost:$(JUICE_PORT) \
+              -output $(Build.ArtifactStagingDirectory)/nikto-report.txt \
+              -Format txt \
+              -Tuning 123bde \
+              -timeout 30
+      displayName: 'Scan Nikto'
+      continueOnError: true  # não quebra a pipeline se achar vulns
+
+    # 5. [OPCIONAL] Nuclei contra o Juice Shop
+    - script: |
+        nuclei -u http://localhost:$(JUICE_PORT) \
+               -t exposures,vulnerabilities,misconfiguration \
+               -o $(Build.ArtifactStagingDirectory)/nuclei-report.txt \
+               -silent
+      displayName: 'Scan Nuclei'
+      continueOnError: true
+
+    # 6. Publica relatórios como artifact da pipeline
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'security-reports'
+        publishLocation: 'Container'
+      displayName: 'Publicar relatórios'
+      condition: always()  # publica mesmo se steps anteriores falharem
