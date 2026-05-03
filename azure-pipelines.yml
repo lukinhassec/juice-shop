@@ -25,9 +25,14 @@ jobs:
       displayName: 'Subir Juice Shop'
 
     - script: |
+        mkdir -p $(Build.ArtifactStagingDirectory)/zap-output
+        chmod 777 $(Build.ArtifactStagingDirectory)/zap-output
+      displayName: 'Prep diretório ZAP'
+
+    - script: |
         docker run --rm \
           --network host \
-          -v $(Build.ArtifactStagingDirectory):/zap/wrk:rw \
+          -v $(Build.ArtifactStagingDirectory)/zap-output:/zap/wrk:rw \
           ghcr.io/zaproxy/zaproxy:stable \
           zap-baseline.py \
             -t http://localhost:$(JUICE_PORT) \
@@ -39,7 +44,7 @@ jobs:
 
     - task: PublishBuildArtifacts@1
       inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/zap-output'
         ArtifactName: 'zap-reports'
         publishLocation: 'Container'
       displayName: 'Publicar relatório ZAP'
