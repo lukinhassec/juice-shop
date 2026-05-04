@@ -28,24 +28,49 @@ stages:
         steps:
           # ── 1. Checkout ──────────────────────────────────────────────────
           - checkout: self
+            displayName: 'Checkout repo'
 
-          # ── 2. Python ────────────────────────────────────────────────────
+          # ── 2. Diagnóstico de paths (remova após confirmar) ───────────────
+          - script: |
+              echo "=== PWD ==="
+              pwd
+              echo "=== Build.SourcesDirectory ==="
+              echo "$(Build.SourcesDirectory)"
+              echo "=== Conteúdo do SourcesDirectory ==="
+              ls -la "$(Build.SourcesDirectory)"
+              echo "=== Procurando requirements.txt ==="
+              find "$(Agent.WorkFolder)" -name "requirements.txt" 2>/dev/null \
+                || echo "NENHUM requirements.txt encontrado no workspace"
+              echo "=== Procurando zap_pipeline.py ==="
+              find "$(Agent.WorkFolder)" -name "zap_pipeline.py" 2>/dev/null \
+                || echo "NENHUM zap_pipeline.py encontrado no workspace"
+            displayName: 'Diagnostico de paths'
+
+          # ── 3. Python ────────────────────────────────────────────────────
           - task: UsePythonVersion@0
             displayName: 'Setup Python $(PYTHON_VERSION)'
             inputs:
               versionSpec: '$(PYTHON_VERSION)'
               addToPath: true
 
+          # ── 4. Install dependencies ───────────────────────────────────────
           - script: |
-              echo "Working dir: $(pwd)"
-              echo "Repo contents:"
-              ls -la
+              set -e
+              echo "Instalando dependências em: $(Build.SourcesDirectory)"
+              cd "$(Build.SourcesDirectory)"
+              pip install --upgrade pip
               pip install -r requirements.txt
             displayName: 'Install dependencies'
-            workingDirectory: '$(Build.SourcesDirectory)'
 
-          # ── 3. Sobe ZAP ──────────────────────────────────────────────────
+          # ── 5. Cria diretório de reports ──────────────────────────────────
           - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/reports"
+              echo "Reports dir: $(Build.ArtifactStagingDirectory)/reports"
+            displayName: 'Create reports directory'
+
+          # ── 6. Sobe ZAP ──────────────────────────────────────────────────
+          - script: |
+              set -e
               docker pull $(ZAP_IMAGE)
               docker run -d \
                 --name zap \
@@ -57,8 +82,10 @@ stages:
                   -config api.disablekey=true \
                   -config api.addrs.addr.regex=true \
                   -config "api.addrs.addr.name=.*"
+              echo "ZAP container iniciado."
             displayName: 'Start ZAP daemon'
 
+          # ── 7. Aguarda ZAP ficar pronto ───────────────────────────────────
           - script: |
               MAX=30
               i=0
@@ -74,21 +101,19 @@ stages:
               echo "ZAP pronto."
             displayName: 'Wait for ZAP health'
 
-          # ── 4. Executa o pipeline ─────────────────────────────────────────
+          # ── 8. Executa o pipeline ─────────────────────────────────────────
           - script: |
-              mkdir -p "$(Build.ArtifactStagingDirectory)/reports"
+              cd "$(Build.SourcesDirectory)"
 
               python zap_pipeline.py \
                 --config zap_config.yaml \
                 --output-dir "$(Build.ArtifactStagingDirectory)/reports" \
                 --log-level INFO
 
-              # Captura exit code e exporta como ADO variable
               ZAP_EC=$?
               echo "Exit code do zap_pipeline: $ZAP_EC"
               echo "##vso[task.setvariable variable=ZAP_EXIT_CODE]$ZAP_EC"
             displayName: 'Run ZAP Pipeline'
-            workingDirectory: '$(Build.SourcesDirectory)'
             continueOnError: true
             env:
               ADMIN_EMAIL:      $(ADMIN_EMAIL)
@@ -98,18 +123,18 @@ stages:
               USER_B_EMAIL:     $(USER_B_EMAIL)
               USER_B_PASSWORD:  $(USER_B_PASSWORD)
 
-          # ── 5. Para o container ZAP ───────────────────────────────────────
+          # ── 9. Para o container ZAP ───────────────────────────────────────
           - script: |
               docker stop zap 2>/dev/null || true
               docker rm   zap 2>/dev/null || true
+              echo "ZAP container encerrado."
             displayName: 'Stop ZAP container'
             condition: always()
 
-          # ── 6. Interpreta exit codes ──────────────────────────────────────
-          # Lê a ADO variable com sintaxe de macro $(VAR), não como env var bash
+          # ── 10. Interpreta exit codes ─────────────────────────────────────
           - script: |
               EC="$(ZAP_EXIT_CODE)"
-              echo "Exit code recebido: $EC"
+              echo "Exit code recebido: '$EC'"
               case "$EC" in
                 0)
                   echo "DAST concluído sem findings críticos."
@@ -142,7 +167,19 @@ stages:
             displayName: 'Evaluate exit code'
             condition: always()
 
-          # ── 7. Publica artefatos ──────────────────────────────────────────
+          # ── 11. Garante que o diretório de reports existe antes de publicar ─
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/reports"
+              # Cria um arquivo sentinela para o caso de nenhum report ter sido gerado
+              # (evita falha do PublishBuildArtifacts por diretório vazio)
+              if [ -z "$(ls -A $(Build.ArtifactStagingDirectory)/reports 2>/dev/null)" ]; then
+                echo "Nenhum report gerado — pipeline falhou antes de produzir artefatos." \
+                  > "$(Build.ArtifactStagingDirectory)/reports/no_reports.txt"
+              fi
+            displayName: 'Ensure reports directory'
+            condition: always()
+
+          # ── 12. Publica artefatos ─────────────────────────────────────────
           - task: PublishBuildArtifacts@1
             displayName: 'Publish DAST reports'
             condition: always()
