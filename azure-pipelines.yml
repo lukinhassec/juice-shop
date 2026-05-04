@@ -1,6 +1,3 @@
-# azure-pipelines-dast.yml
-# Trigger: PRs e pushes para main/develop. Ajuste conforme seu fluxo.
-
 trigger:
   branches:
     include:
@@ -17,7 +14,6 @@ variables:
   PYTHON_VERSION: '3.11'
   ZAP_IMAGE: 'ghcr.io/zaproxy/zaproxy:stable'
   ZAP_PORT: '8080'
-  REPORTS_DIR: '$(Build.ArtifactStagingDirectory)/reports'
 
 stages:
   - stage: DAST
@@ -27,7 +23,7 @@ stages:
         displayName: 'ZAP Pipeline Scan'
         pool:
           vmImage: 'ubuntu-latest'
-        timeoutInMinutes: 60  # Ajuste conforme spider/active scan timeout somados
+        timeoutInMinutes: 60
 
         steps:
           # ── 1. Checkout ──────────────────────────────────────────────────
@@ -40,12 +36,15 @@ stages:
               versionSpec: '$(PYTHON_VERSION)'
               addToPath: true
 
-          - script: pip install -r requirements.txt
+          - script: |
+              echo "Working dir: $(pwd)"
+              echo "Repo contents:"
+              ls -la
+              pip install -r requirements.txt
             displayName: 'Install dependencies'
+            workingDirectory: '$(Build.SourcesDirectory)'
 
-          # ── 3. Sobe ZAP como container sidecar via Docker ─────────────────
-          # Azure Pipelines não tem "services" nativo como GHA/GitLab,
-          # então subimos o ZAP em background e esperamos o health check.
+          # ── 3. Sobe ZAP ──────────────────────────────────────────────────
           - script: |
               docker pull $(ZAP_IMAGE)
               docker run -d \
@@ -58,8 +57,7 @@ stages:
                   -config api.disablekey=true \
                   -config api.addrs.addr.regex=true \
                   -config "api.addrs.addr.name=.*"
-              echo "ZAP container iniciado, aguardando health..."
-            displayName: 'Start ZAP daemon (Docker)'
+            displayName: 'Start ZAP daemon'
 
           - script: |
               MAX=30
@@ -77,17 +75,21 @@ stages:
             displayName: 'Wait for ZAP health'
 
           # ── 4. Executa o pipeline ─────────────────────────────────────────
-          # Credenciais vêm de Variable Groups ou Secrets no Azure DevOps.
-          # Mapeie em Library > Variable Groups e vincule ao pipeline,
-          # ou cadastre direto em Pipeline > Variables (cadeado).
           - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/reports"
+
               python zap_pipeline.py \
                 --config zap_config.yaml \
-                --output-dir "$(REPORTS_DIR)" \
+                --output-dir "$(Build.ArtifactStagingDirectory)/reports" \
                 --log-level INFO
-              echo "##vso[task.setvariable variable=ZAP_EXIT_CODE]$?"
+
+              # Captura exit code e exporta como ADO variable
+              ZAP_EC=$?
+              echo "Exit code do zap_pipeline: $ZAP_EC"
+              echo "##vso[task.setvariable variable=ZAP_EXIT_CODE]$ZAP_EC"
             displayName: 'Run ZAP Pipeline'
-            continueOnError: true  # Necessário para capturar o exit code antes de falhar o job
+            workingDirectory: '$(Build.SourcesDirectory)'
+            continueOnError: true
             env:
               ADMIN_EMAIL:      $(ADMIN_EMAIL)
               ADMIN_PASSWORD:   $(ADMIN_PASSWORD)
@@ -95,48 +97,56 @@ stages:
               USER_A_PASSWORD:  $(USER_A_PASSWORD)
               USER_B_EMAIL:     $(USER_B_EMAIL)
               USER_B_PASSWORD:  $(USER_B_PASSWORD)
-              ZAP_PROXY:        'http://localhost:$(ZAP_PORT)'
 
           # ── 5. Para o container ZAP ───────────────────────────────────────
-          - script: docker stop zap && docker rm zap
+          - script: |
+              docker stop zap 2>/dev/null || true
+              docker rm   zap 2>/dev/null || true
             displayName: 'Stop ZAP container'
             condition: always()
 
-          # ── 6. Interpreta exit codes e seta status do job ─────────────────
-          # Exit codes do zap_pipeline.py:
-          #   0 = OK
-          #   1 = Findings acima do threshold
-          #   2 = Logic test failure
-          #   3 = Config/ZAP error
-          #   4 = Scan timeout
+          # ── 6. Interpreta exit codes ──────────────────────────────────────
+          # Lê a ADO variable com sintaxe de macro $(VAR), não como env var bash
           - script: |
-              EC=$(ZAP_EXIT_CODE)
+              EC="$(ZAP_EXIT_CODE)"
               echo "Exit code recebido: $EC"
-              case $EC in
-                0) echo "##vso[task.logissue type=warning]DAST concluído sem findings críticos." ;;
-                1) echo "##vso[task.logissue type=error]Findings acima do threshold detectados (exit 1)."
-                   echo "##vso[task.complete result=Failed;]DAST: findings acima do threshold." ;;
-                2) echo "##vso[task.logissue type=error]Logic tests falharam (exit 2) — possível falha de autorização/IDOR."
-                   echo "##vso[task.complete result=Failed;]DAST: logic test failure." ;;
-                3) echo "##vso[task.logissue type=error]Erro de configuração ou ZAP inacessível (exit 3)."
-                   echo "##vso[task.complete result=Failed;]DAST: config/ZAP error." ;;
-                4) echo "##vso[task.logissue type=warning]Scan timeout (exit 4) — resultados parciais."
-                   echo "##vso[task.complete result=Failed;]DAST: timeout." ;;
-                *) echo "##vso[task.logissue type=error]Exit code desconhecido: $EC"
-                   echo "##vso[task.complete result=Failed;]DAST: exit code inesperado." ;;
+              case "$EC" in
+                0)
+                  echo "DAST concluído sem findings críticos."
+                  ;;
+                1)
+                  echo "##vso[task.logissue type=error]Findings acima do threshold (exit 1)."
+                  echo "##vso[task.complete result=Failed;]DAST: findings acima do threshold."
+                  ;;
+                2)
+                  echo "##vso[task.logissue type=error]Logic tests falharam (exit 2)."
+                  echo "##vso[task.complete result=Failed;]DAST: logic test failure."
+                  ;;
+                3)
+                  echo "##vso[task.logissue type=error]Config ou ZAP inacessível (exit 3)."
+                  echo "##vso[task.complete result=Failed;]DAST: config/ZAP error."
+                  ;;
+                4)
+                  echo "##vso[task.logissue type=warning]Scan timeout (exit 4)."
+                  echo "##vso[task.complete result=Failed;]DAST: timeout."
+                  ;;
+                "")
+                  echo "##vso[task.logissue type=error]Exit code vazio — step anterior falhou antes de setar a variável."
+                  echo "##vso[task.complete result=Failed;]DAST: pipeline não executou."
+                  ;;
+                *)
+                  echo "##vso[task.logissue type=error]Exit code desconhecido: $EC"
+                  echo "##vso[task.complete result=Failed;]DAST: exit code inesperado."
+                  ;;
               esac
             displayName: 'Evaluate exit code'
             condition: always()
 
-          # ── 7. Publica artefatos (sempre, inclusive em falha) ─────────────
+          # ── 7. Publica artefatos ──────────────────────────────────────────
           - task: PublishBuildArtifacts@1
             displayName: 'Publish DAST reports'
             condition: always()
             inputs:
-              pathToPublish: '$(REPORTS_DIR)'
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/reports'
               artifactName: 'dast-reports'
               publishLocation: 'Container'
-
-          # ── 8. Publica resultados SARIF no Advanced Security (se habilitado) ─
-          # Requer Azure DevOps Advanced Security (GHAS for Azure DevOps).
-          # Comente o bloco abaixo se não usar.
