@@ -1,189 +1,51 @@
-trigger:
-  branches:
-    include:
-      - main
-      - develop
+trigger: none
 
-pr:
-  branches:
-    include:
-      - main
-      - develop
+pool:
+  vmImage: 'ubuntu-latest'
 
 variables:
-  PYTHON_VERSION: '3.11'
-  ZAP_IMAGE: 'ghcr.io/zaproxy/zaproxy:stable'
-  ZAP_PORT: '8080'
+  JUICE_PORT: 3000
 
-stages:
-  - stage: DAST
-    displayName: 'DAST — OWASP ZAP'
-    jobs:
-      - job: ZAPScan
-        displayName: 'ZAP Pipeline Scan'
-        pool:
-          vmImage: 'ubuntu-latest'
-        timeoutInMinutes: 60
+jobs:
+  - job: JuiceShopLab
+    displayName: 'Juice Shop + ZAP DAST'
+    timeoutInMinutes: 59
 
-        steps:
-          # ── 1. Checkout ──────────────────────────────────────────────────
-          - checkout: self
-            displayName: 'Checkout repo'
+    steps:
 
-          # ── 2. Diagnóstico de paths (remova após confirmar) ───────────────
-          - script: |
-              echo "=== PWD ==="
-              pwd
-              echo "=== Build.SourcesDirectory ==="
-              echo "$(Build.SourcesDirectory)"
-              echo "=== Conteúdo do SourcesDirectory ==="
-              ls -la "$(Build.SourcesDirectory)"
-              echo "=== Procurando requirements.txt ==="
-              find "$(Agent.WorkFolder)" -name "requirements.txt" 2>/dev/null \
-                || echo "NENHUM requirements.txt encontrado no workspace"
-              echo "=== Procurando zap_pipeline.py ==="
-              find "$(Agent.WorkFolder)" -name "zap_pipeline.py" 2>/dev/null \
-                || echo "NENHUM zap_pipeline.py encontrado no workspace"
-            displayName: 'Diagnostico de paths'
+    - script: |
+        docker pull bkimminich/juice-shop:latest
+        docker run -d \
+          --name juice-shop \
+          -p $(JUICE_PORT):3000 \
+          bkimminich/juice-shop:latest
+        echo "Aguardando Juice Shop..."
+        sleep 20
+        curl -sf http://localhost:$(JUICE_PORT) > /dev/null && echo "Juice Shop UP" || exit 1
+      displayName: 'Subir Juice Shop'
 
-          # ── 3. Python ────────────────────────────────────────────────────
-          - task: UsePythonVersion@0
-            displayName: 'Setup Python $(PYTHON_VERSION)'
-            inputs:
-              versionSpec: '$(PYTHON_VERSION)'
-              addToPath: true
+    - script: |
+        mkdir -p $(Build.ArtifactStagingDirectory)/zap-output
+        chmod 777 $(Build.ArtifactStagingDirectory)/zap-output
+      displayName: 'Prep diretório ZAP'
 
-          # ── 4. Install dependencies ───────────────────────────────────────
-          - script: |
-              set -e
-              echo "Instalando dependências em: $(Build.SourcesDirectory)"
-              cd "$(Build.SourcesDirectory)"
-              pip install --upgrade pip
-              pip install -r requirements.txt
-            displayName: 'Install dependencies'
+    - script: |
+        docker run --rm \
+          --network host \
+          -v $(Build.ArtifactStagingDirectory)/zap-output:/zap/wrk:rw \
+          ghcr.io/zaproxy/zaproxy:stable \
+          zap-baseline.py \
+            -t http://localhost:$(JUICE_PORT) \
+            -r zap-report.html \
+            -J zap-report.json \
+            -I
+      displayName: 'ZAP Baseline Scan'
+      continueOnError: true
 
-          # ── 5. Cria diretório de reports ──────────────────────────────────
-          - script: |
-              mkdir -p "$(Build.ArtifactStagingDirectory)/reports"
-              echo "Reports dir: $(Build.ArtifactStagingDirectory)/reports"
-            displayName: 'Create reports directory'
-
-          # ── 6. Sobe ZAP ──────────────────────────────────────────────────
-          - script: |
-              set -e
-              docker pull $(ZAP_IMAGE)
-              docker run -d \
-                --name zap \
-                -p $(ZAP_PORT):8080 \
-                $(ZAP_IMAGE) \
-                zap.sh -daemon \
-                  -host 0.0.0.0 \
-                  -port 8080 \
-                  -config api.disablekey=true \
-                  -config api.addrs.addr.regex=true \
-                  -config "api.addrs.addr.name=.*"
-              echo "ZAP container iniciado."
-            displayName: 'Start ZAP daemon'
-
-          # ── 7. Aguarda ZAP ficar pronto ───────────────────────────────────
-          - script: |
-              MAX=30
-              i=0
-              until curl -fsSL http://localhost:$(ZAP_PORT)/JSON/core/view/version/ > /dev/null 2>&1; do
-                i=$((i+1))
-                if [ $i -ge $MAX ]; then
-                  echo "ZAP não respondeu após $MAX tentativas."
-                  exit 1
-                fi
-                echo "Aguardando ZAP... ($i/$MAX)"
-                sleep 5
-              done
-              echo "ZAP pronto."
-            displayName: 'Wait for ZAP health'
-
-          # ── 8. Executa o pipeline ─────────────────────────────────────────
-          - script: |
-              cd "$(Build.SourcesDirectory)"
-
-              python zap_pipeline.py \
-                --config zap_config.yaml \
-                --output-dir "$(Build.ArtifactStagingDirectory)/reports" \
-                --log-level INFO
-
-              ZAP_EC=$?
-              echo "Exit code do zap_pipeline: $ZAP_EC"
-              echo "##vso[task.setvariable variable=ZAP_EXIT_CODE]$ZAP_EC"
-            displayName: 'Run ZAP Pipeline'
-            continueOnError: true
-            env:
-              ADMIN_EMAIL:      $(ADMIN_EMAIL)
-              ADMIN_PASSWORD:   $(ADMIN_PASSWORD)
-              USER_A_EMAIL:     $(USER_A_EMAIL)
-              USER_A_PASSWORD:  $(USER_A_PASSWORD)
-              USER_B_EMAIL:     $(USER_B_EMAIL)
-              USER_B_PASSWORD:  $(USER_B_PASSWORD)
-
-          # ── 9. Para o container ZAP ───────────────────────────────────────
-          - script: |
-              docker stop zap 2>/dev/null || true
-              docker rm   zap 2>/dev/null || true
-              echo "ZAP container encerrado."
-            displayName: 'Stop ZAP container'
-            condition: always()
-
-          # ── 10. Interpreta exit codes ─────────────────────────────────────
-          - script: |
-              EC="$(ZAP_EXIT_CODE)"
-              echo "Exit code recebido: '$EC'"
-              case "$EC" in
-                0)
-                  echo "DAST concluído sem findings críticos."
-                  ;;
-                1)
-                  echo "##vso[task.logissue type=error]Findings acima do threshold (exit 1)."
-                  echo "##vso[task.complete result=Failed;]DAST: findings acima do threshold."
-                  ;;
-                2)
-                  echo "##vso[task.logissue type=error]Logic tests falharam (exit 2)."
-                  echo "##vso[task.complete result=Failed;]DAST: logic test failure."
-                  ;;
-                3)
-                  echo "##vso[task.logissue type=error]Config ou ZAP inacessível (exit 3)."
-                  echo "##vso[task.complete result=Failed;]DAST: config/ZAP error."
-                  ;;
-                4)
-                  echo "##vso[task.logissue type=warning]Scan timeout (exit 4)."
-                  echo "##vso[task.complete result=Failed;]DAST: timeout."
-                  ;;
-                "")
-                  echo "##vso[task.logissue type=error]Exit code vazio — step anterior falhou antes de setar a variável."
-                  echo "##vso[task.complete result=Failed;]DAST: pipeline não executou."
-                  ;;
-                *)
-                  echo "##vso[task.logissue type=error]Exit code desconhecido: $EC"
-                  echo "##vso[task.complete result=Failed;]DAST: exit code inesperado."
-                  ;;
-              esac
-            displayName: 'Evaluate exit code'
-            condition: always()
-
-          # ── 11. Garante que o diretório de reports existe antes de publicar ─
-          - script: |
-              mkdir -p "$(Build.ArtifactStagingDirectory)/reports"
-              # Cria um arquivo sentinela para o caso de nenhum report ter sido gerado
-              # (evita falha do PublishBuildArtifacts por diretório vazio)
-              if [ -z "$(ls -A $(Build.ArtifactStagingDirectory)/reports 2>/dev/null)" ]; then
-                echo "Nenhum report gerado — pipeline falhou antes de produzir artefatos." \
-                  > "$(Build.ArtifactStagingDirectory)/reports/no_reports.txt"
-              fi
-            displayName: 'Ensure reports directory'
-            condition: always()
-
-          # ── 12. Publica artefatos ─────────────────────────────────────────
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publish DAST reports'
-            condition: always()
-            inputs:
-              pathToPublish: '$(Build.ArtifactStagingDirectory)/reports'
-              artifactName: 'dast-reports'
-              publishLocation: 'Container'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/zap-output'
+        ArtifactName: 'zap-reports'
+        publishLocation: 'Container'
+      displayName: 'Publicar relatório ZAP'
+      condition: always()
